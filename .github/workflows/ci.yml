@@ -134,3 +134,14 @@ jobs:
         run: |
           cd webui
           pnpm build
+
+  # Single required check for the org rulesets (PointCare-bv/github-config, sc-636).
+  # Fails when any job above failed or was cancelled; skipped jobs (e.g. deploy on PRs) are fine.
+  ci-gate:
+    if: always()   # without it a failed job skips the gate, and a skipped required check counts as passed
+    needs: [lint-console, build-rust, build-console]
+    runs-on: ubuntu-latest
+    steps:
+      - name: All jobs passed
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1
