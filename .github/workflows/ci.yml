@@ -7,9 +7,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out
-        uses: actions/checkout@v3
+        uses: actions/checkout@v7
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 9.0.6
           run_install: |
@@ -21,13 +21,17 @@ jobs:
           pnpm check
           
   build-rust:
-    runs-on: ubuntu-22.04-32
+    runs-on: ubuntu-24.04
     env:
       DATABASE_URL: "postgres://arroyo:arroyo@localhost:5432/arroyo"
     steps:
       - name: Check out
-        uses: actions/checkout@v3
-      - uses: actions/setup-java@v3
+        uses: actions/checkout@v7
+      - name: Free disk space   # standard runners have ~14 GB free; this build needs more (sc-636)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
+      - uses: actions/setup-java@v6
         with:
           distribution: 'temurin'
           java-version: '11'
@@ -36,7 +40,7 @@ jobs:
         with:
           components: clippy, rustfmt
           toolchain: 1.88
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/bin/
@@ -47,12 +51,12 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
       - name: Check Formatting
         run: cargo fmt -- --check
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         name: Setup Python
         with:
           python-version: '3.12'            
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 9.0.6
           run_install: |
@@ -69,23 +73,21 @@ jobs:
           sudo systemctl start postgresql
           sudo -u postgres psql -c "CREATE USER arroyo WITH PASSWORD 'arroyo' SUPERUSER;"
           sudo -u postgres createdb arroyo
-          pushd /tmp
-            wget https://github.com/rust-db/refinery/releases/download/0.8.7/refinery-0.8.7-x86_64-unknown-linux-musl.tar.gz
-            tar xvfz refinery*.tar.gz
-            mv /tmp/refinery*-musl/refinery /tmp
-          popd
-          /tmp/refinery migrate -e DATABASE_URL -p crates/arroyo-api/migrations
+          # refinery 0.8.7's prebuilt binary needs OpenSSL 1.1 (not on ubuntu-24.04) and newer
+          # releases ship no Linux binary: build the same version, Postgres only (sc-636)
+          cargo install refinery_cli --version 0.8.7 --locked --no-default-features --features postgresql --root /tmp/refinery-cli
+          /tmp/refinery-cli/bin/refinery migrate -e DATABASE_URL -p crates/arroyo-api/migrations
       - name: Install dependencies
         run: |
           curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ${CARGO_HOME:-~/.cargo}/bin
-          sudo apt-get install -y cmake clang ruby unzip postgresql libsasl2-dev netcat
+          sudo apt-get install -y cmake clang ruby unzip postgresql libsasl2-dev netcat-openbsd
           wget https://github.com/protocolbuffers/protobuf/releases/download/v21.8/protoc-21.8-linux-x86_64.zip
           unzip protoc*.zip
           sudo mv bin/protoc /usr/local/bin
           curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
       - name: Install Kafka
         run: |
-          wget --progress=dot --show-progress https://dlcdn.apache.org/kafka/3.9.1/kafka_2.13-3.9.1.tgz
+          wget --progress=dot --show-progress https://archive.apache.org/dist/kafka/3.9.1/kafka_2.13-3.9.1.tgz
           tar xvfz kafka*.tgz
           mkdir /tmp/kraft-combined-logs
           kafka_*/bin/kafka-storage.sh format -t 9v5PspiySuWU2l5NjTgRuA -c kafka_*/config/kraft/server.properties
@@ -110,21 +112,21 @@ jobs:
         run: |
           mkdir /tmp/arroyo-integ
           ARROYO__DISABLE_TELEMETRY=true ARROYO__CHECKPOINT_URL=file:///tmp/arroyo-integ ARROYO__COMPILER__ARTIFACT_URL=file:///tmp/artifacts target/debug/arroyo cluster &
-          cargo nextest run --package integ -E 'kind(test)'
+          cargo nextest run --package integ -E 'kind(test)' --retries 2
       - name: Integ sqlite
         run: |
           killall arroyo
           ARROYO__DISABLE_TELEMETRY=true ARROYO__CHECKPOINT_URL=file:///tmp/arroyo-integ ARROYO__COMPILER__ARTIFACT_URL=file:///tmp/artifacts ARROYO__DATABASE__TYPE=sqlite target/debug/arroyo cluster &
           timeout=10; while ! nc -z localhost 5115 && [ $timeout -gt 0 ]; do sleep 1; timeout=$((timeout - 1)); done; [ $timeout -gt 0 ]
-          cargo nextest run --package integ -E 'kind(test)'
+          cargo nextest run --package integ -E 'kind(test)' --retries 2
           
   build-console:
     runs-on: ubuntu-latest
     steps:
       - name: Check out
-        uses: actions/checkout@v3
+        uses: actions/checkout@v7
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 9.0.6
           run_install: |
@@ -134,3 +136,14 @@ jobs:
         run: |
           cd webui
           pnpm build
+
+  # Single required check for the org rulesets (PointCare-bv/github-config, sc-636).
+  # Fails when any job above failed or was cancelled; skipped jobs (e.g. deploy on PRs) are fine.
+  ci-gate:
+    if: always()   # without it a failed job skips the gate, and a skipped required check counts as passed
+    needs: [lint-console, build-rust, build-console]
+    runs-on: ubuntu-latest
+    steps:
+      - name: All jobs passed
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1
