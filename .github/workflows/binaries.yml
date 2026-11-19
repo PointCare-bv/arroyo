@@ -24,7 +24,7 @@ jobs:
     runs-on: ${{ matrix.config.runner }}
     services:
       postgres:
-        image: postgres:14.13-alpine3.20
+        image: postgres:16-alpine
         env:
           POSTGRES_USER: arroyo
           POSTGRES_PASSWORD: arroyo
